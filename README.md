@@ -29,7 +29,7 @@ chmod +x build.sh && ./build.sh
 
 ## 安装与使用
 
-1. PlayCover → 设置 → 杂项 → 自定义插件，添加 `build/SekaiPad.dylib`（需要 PlayCover 4.0+）。
+1. 在 PlayCover 的应用库里右键 Project SEKAI 图标 → 设置 → 「杂项」标签页，往下找到英文的 **Custom Plugins** 区域，点 **Add…** 选择 `build/SekaiPad.dylib`（弹出警告时点 Add Anyway）。这是每个游戏单独的设置，不在 PlayCover 菜单栏的偏好设置里。
 2. 关掉 Project SEKAI 的「触控替代」（游戏菜单栏里），避免和它冲突。
 3. 系统设置 → 触控板：
    - **关闭「轻点来点按」**，否则手指一碰就会在光标位置多出一个触点；
