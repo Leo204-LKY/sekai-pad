@@ -1,5 +1,10 @@
 # SekaiPad — PlayCover 下 Project SEKAI 的触控板直触方案
 
+> [!WARNING]
+> 本项目是非官方的个人工具，代码完全由 Claude 编写，与 SEGA、Colorful Palette、朝夕光年、Crypton Future Media 等公司或团体均无任何关联。目前只在中国大陆版《初音未来：缤纷舞台》上测试过，其他服务器版本未经验证。使用第三方工具可能违反游戏的服务条款，由此导致的封号等后果由使用者自行承担，作者不承担任何责任。
+>
+> This is an unofficial, fan-made tool written entirely by Claude. It is not affiliated with or endorsed by SEGA, Colorful Palette, Nuverse, Crypton Future Media, or any related company. It has only been tested on the Mainland China version of the game (初音未来：缤纷舞台); other regional versions are untested. Using third-party tools may violate the game's Terms of Service; you use it at your own risk, and the author accepts no responsibility for account bans or any other consequences.
+
 ## 它做什么
 
 - **忽略按下的高度**：手指在触控板任何高度按下，都落在判定线上；横向位置按判定线处的轨道宽度线性映射，所以不会越往上越窄。
