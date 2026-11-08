@@ -5,6 +5,10 @@
 
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import <os/log.h>
+
+// 用 public 格式输出，否则「控制台」里只显示 <private>
+#define SPLOG(fmt, ...) os_log(OS_LOG_DEFAULT, "%{public}@", [NSString stringWithFormat:fmt, ##__VA_ARGS__])
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -25,19 +29,21 @@ static Class gPT;
 static SEL gSel5, gSel3, gSelAvail;
 static BOOL gResolved;
 static dispatch_source_t gSrc, gTimer;
+static BOOL gGotFirst;
+static int gBeganLogs;
 
 static void Resolve(void) {
     if (gResolved) return;
     gResolved = YES;
     gPT = NSClassFromString(@"PTFakeMetaTouch");
-    if (!gPT) { NSLog(@"[SekaiPad] 找不到 PTFakeMetaTouch（PlayTools 未加载？）"); return; }
+    if (!gPT) { SPLOG(@"[SekaiPad] 找不到 PTFakeMetaTouch（PlayTools 未加载？）"); return; }
     SEL s5 = NSSelectorFromString(@"fakeTouchId:AtPoint:withTouchPhase:inWindow:onView:");
     SEL s3 = NSSelectorFromString(@"fakeTouchId:AtPoint:withTouchPhase:");
     SEL sa = NSSelectorFromString(@"getAvailablePointId");
     if ([gPT respondsToSelector:s5]) gSel5 = s5;
     if ([gPT respondsToSelector:s3]) gSel3 = s3;
     if ([gPT respondsToSelector:sa]) gSelAvail = sa;
-    NSLog(@"[SekaiPad] PTFakeMetaTouch: 5参=%d 3参=%d avail=%d", gSel5 != NULL, gSel3 != NULL, gSelAvail != NULL);
+    SPLOG(@"[SekaiPad] PTFakeMetaTouch: 5参=%d 3参=%d avail=%d", gSel5 != NULL, gSel3 != NULL, gSelAvail != NULL);
 }
 
 static UIWindow *KeyWindow(void) {
@@ -62,9 +68,14 @@ static NSInteger Fake(NSInteger pid, CGPoint p, UITouchPhase ph, UIWindow *w, UI
 // 在主线程调用：把当前帧的手指集合与上一帧比较，生成 began / moved / ended
 static void Apply(const Ent *e, int n) {
     Resolve();
-    if (!gPT || !gSelAvail || (!gSel5 && !gSel3)) return;
+    if (!gPT || (!gSel5 && !gSel3)) return;
 
     UIWindow *w = KeyWindow();
+    static BOOL warned;
+    if (!warned && n > 0 && (!w || UIApplication.sharedApplication.applicationState != UIApplicationStateActive)) {
+        warned = YES;
+        SPLOG(@"[SekaiPad] 忽略触摸：window=%@ state=%ld", w, (long)UIApplication.sharedApplication.applicationState);
+    }
     if (!w || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) n = 0;
     CGSize sz = w ? w.bounds.size : CGSizeMake(0, 0);
 
@@ -93,11 +104,18 @@ static void Apply(const Ent *e, int n) {
                 gSlot[slot].p = p;
             }
         } else if (freeSlot >= 0) {
-            NSInteger pid = ((NSInteger (*)(id, SEL))objc_msgSend)(gPT, gSelAvail);
-            if (pid <= 0) continue;
+            // 新版 PlayTools：传 -1 由它分配编号（从 0 开始）；旧版需先 getAvailablePointId
+            NSInteger pid = gSelAvail ? ((NSInteger (*)(id, SEL))objc_msgSend)(gPT, gSelAvail) : -1;
+            if (gSelAvail && pid <= 0) continue;
             UIView *v = [w hitTest:p withEvent:nil] ?: w;
-            pid = Fake(pid, p, UITouchPhaseBegan, w, v);
-            if (pid <= 0) continue;
+            NSInteger got = Fake(pid, p, UITouchPhaseBegan, w, v);
+            if (gBeganLogs < 20) {
+                gBeganLogs++;
+                SPLOG(@"[SekaiPad] began 指#%d (%.0f,%.0f) 窗口%.0fx%.0f view=%@ pid=%ld->%ld",
+                      e[i].id, p.x, p.y, sz.width, sz.height, NSStringFromClass(v.class), (long)pid, (long)got);
+            }
+            pid = got;
+            if (pid < 0) continue;
             gSlot[freeSlot] = (Slot){ YES, e[i].id, pid, p };
             gViews[@(e[i].id)] = v;
         }
@@ -115,7 +133,7 @@ static void StartListener(void) {
     if (env && atoi(env) > 0) port = atoi(env);
 
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0) { NSLog(@"[SekaiPad] socket 失败"); return; }
+    if (fd < 0) { SPLOG(@"[SekaiPad] socket 失败"); return; }
     struct sockaddr_in a;
     memset(&a, 0, sizeof a);
     a.sin_len = sizeof a;
@@ -123,7 +141,7 @@ static void StartListener(void) {
     a.sin_port = htons((uint16_t)port);
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) {
-        NSLog(@"[SekaiPad] 绑定 127.0.0.1:%d 失败（端口被占用或沙盒限制）", port);
+        SPLOG(@"[SekaiPad] 绑定 127.0.0.1:%d 失败（端口被占用或沙盒限制）", port);
         close(fd);
         return;
     }
@@ -145,6 +163,7 @@ static void StartListener(void) {
             // 每个包按顺序在主线程处理（不合并，避免吞掉极短的点按）
             dispatch_async(dispatch_get_main_queue(), ^{
                 gLastPacket = CFAbsoluteTimeGetCurrent();
+                if (!gGotFirst) { gGotFirst = YES; SPLOG(@"[SekaiPad] 收到第一个数据包（%d 指）", cnt); }
                 Apply((const Ent *)d.bytes, cnt);
             });
         }
@@ -158,7 +177,7 @@ static void StartListener(void) {
     });
     dispatch_resume(gTimer);
 
-    NSLog(@"[SekaiPad] 正在监听 127.0.0.1:%d", port);
+    SPLOG(@"[SekaiPad] 正在监听 127.0.0.1:%d", port);
 }
 
 __attribute__((constructor))
