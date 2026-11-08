@@ -17,7 +17,9 @@
 #include <dlfcn.h>
 
 #define MAGIC  0x31504B53u   // "SKP1"：映射开启
+#define MAGIC_NODOT 0x4E504B53u // "SKPN"：映射开启，但不显示触摸点（助手程序 --hide-touches）
 #define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭
+#define DOT_SIZE 44.0         // 触摸点直径（点）
 #define CURSOR_TIMEOUT 0.5    // 这么久没收到「开启」包就恢复鼠标
 #define MAX_E  64
 #define TIMEOUT_SEC 0.25     // 助手程序断开/卡住时自动松开所有手指
@@ -40,6 +42,8 @@ static int (*pHide)(uint32_t);       // CGDisplayHideCursor
 static int (*pShow)(uint32_t);       // CGDisplayShowCursor
 static uint32_t (*pMainDisplay)(void);
 static int gBeganLogs;
+static BOOL gShowDots = YES;
+static NSMutableDictionary<NSNumber *, UIView *> *gDots;   // 手指 id -> 屏幕上的触摸点
 
 static void Resolve(void) {
     if (gResolved) return;
@@ -72,6 +76,40 @@ static NSInteger Fake(NSInteger pid, CGPoint p, UITouchPhase ph, UIWindow *w, UI
         return ((NSInteger (*)(id, SEL, NSInteger, CGPoint, UITouchPhase, UIWindow *, UIView *))objc_msgSend)
             (gPT, gSel5, pid, p, ph, w, v);
     return ((NSInteger (*)(id, SEL, NSInteger, CGPoint, UITouchPhase))objc_msgSend)(gPT, gSel3, pid, p, ph);
+}
+
+// 在注入位置画半透明圆点（类似「触控替代」的点）。
+// userInteractionEnabled = NO，不会挡住 hitTest，也不会吃掉触摸。
+static UIView *MakeDot(void) {
+    UIView *d = [[UIView alloc] initWithFrame:CGRectMake(0, 0, DOT_SIZE, DOT_SIZE)];
+    d.userInteractionEnabled = NO;
+    d.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+    d.layer.cornerRadius = DOT_SIZE / 2;
+    d.layer.borderWidth = 2;
+    d.layer.borderColor = [UIColor colorWithWhite:0.25 alpha:0.6].CGColor;
+    d.layer.zPosition = 10000;
+    return d;
+}
+
+static void UpdateDots(UIWindow *w) {
+    NSMutableSet<NSNumber *> *alive = [NSMutableSet set];
+    if (w && gShowDots) {
+        for (int k = 0; k < MAX_E; k++) {
+            if (!gSlot[k].used) continue;
+            NSNumber *key = @(gSlot[k].fid);
+            [alive addObject:key];
+            UIView *d = gDots[key];
+            if (!d) { d = MakeDot(); gDots[key] = d; }
+            if (d.superview != w) [w addSubview:d];
+            else [w bringSubviewToFront:d];
+            d.center = gSlot[k].p;
+        }
+    }
+    for (NSNumber *key in gDots.allKeys) {
+        if ([alive containsObject:key]) continue;
+        [gDots[key] removeFromSuperview];
+        [gDots removeObjectForKey:key];
+    }
 }
 
 // 在主线程调用：把当前帧的手指集合与上一帧比较，生成 began / moved / ended
@@ -129,6 +167,8 @@ static void Apply(const Ent *e, int n) {
             gViews[@(e[i].id)] = v;
         }
     }
+
+    UpdateDots(w);
 }
 
 // 映射开启 + 游戏在前台时：隐藏鼠标并让它不跟随触控板移动；否则恢复。
@@ -200,6 +240,8 @@ static void StartListener(void) {
                 });
                 continue;
             }
+            BOOL dots = magic == MAGIC;
+            if (magic == MAGIC_NODOT) magic = MAGIC;
             if (magic != MAGIC || count > MAX_E || 8 + count * sizeof(Ent) > (size_t)r) continue;
             NSData *d = [NSData dataWithBytes:buf + 8 length:count * sizeof(Ent)];
             int cnt = (int)count;
@@ -207,6 +249,7 @@ static void StartListener(void) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 gLastPacket = CFAbsoluteTimeGetCurrent();
                 gLastOn = gLastPacket;
+                gShowDots = dots;
                 UpdateCursor();
                 if (!gGotFirst) { gGotFirst = YES; SPLOG(@"[SekaiPad] 收到第一个数据包（%d 指）", cnt); }
                 Apply((const Ent *)d.bytes, cnt);
@@ -229,5 +272,6 @@ static void StartListener(void) {
 __attribute__((constructor))
 static void SekaiPadInit(void) {
     gViews = [NSMutableDictionary new];
+    gDots = [NSMutableDictionary new];
     StartListener();
 }

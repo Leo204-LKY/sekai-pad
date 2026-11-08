@@ -56,6 +56,7 @@ static void (*pMTDeviceStart)(MTDeviceRef, int);
 #define MAX_DEV 4
 #define MAX_F   16
 #define MAGIC   0x31504B53u  // "SKP1"：映射开启时的帧
+#define MAGIC_NODOT 0x4E504B53u // "SKPN"：映射开启，插件不显示触摸点
 #define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭（插件据此恢复鼠标）
 
 typedef struct { int32_t id; float x, y; } Ent;   // x,y 为窗口归一化坐标，y 向下
@@ -81,7 +82,8 @@ static struct {
     int toggle;     // 0 = 始终开启，1 = 跟随 Caps Lock
     int debug;
     int port;
-} cfg = { 0.82f, 0.12f, 0.88f, 0.03f, 0.97f, 1.0f, 1, 0, 47800 };
+    int hideTouches; // 1 = 不在屏幕上显示触摸点
+} cfg = { 0.82f, 0.12f, 0.88f, 0.03f, 0.97f, 1.0f, 1, 0, 47800, 0 };
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -103,7 +105,7 @@ static int MappingOn(void) {
 
 static void SendAll(int on, int quiet) {
     Packet p;
-    p.magic = on ? MAGIC : MAGIC_OFF;
+    p.magic = !on ? MAGIC_OFF : (cfg.hideTouches ? MAGIC_NODOT : MAGIC);
     p.count = 0;
     if (on) {
         for (int d = 0; d < gNDev; d++) {
@@ -184,6 +186,7 @@ static void Usage(const char *argv0) {
         "  --flick-gain F  竖向位移倍率，越大 Flick 越容易 (默认 %.2f)\n"
         "  --toggle MODE   capslock = Caps Lock 亮灯时生效 / always = 一直生效 (默认 capslock)\n"
         "  --port N        UDP 端口 (默认 %d)\n"
+        "  --hide-touches  不在游戏画面上显示触摸点（默认显示）\n"
         "  --debug         打印每帧映射后的坐标\n",
         argv0, cfg.judgeY, cfg.left, cfg.right, cfg.padL, cfg.padR, cfg.gain, cfg.port);
 }
@@ -199,11 +202,12 @@ int main(int argc, char **argv) {
         { "toggle",     required_argument, 0, 't' },
         { "port",       required_argument, 0, 'p' },
         { "debug",      no_argument,       0, 'd' },
+        { "hide-touches", no_argument,     0, 'H' },
         { "help",       no_argument,       0, 'h' },
         { 0, 0, 0, 0 }
     };
     int c;
-    while ((c = getopt_long(argc, argv, "y:l:r:L:R:g:t:p:dh", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "y:l:r:L:R:g:t:p:dHh", opts, NULL)) != -1) {
         switch (c) {
             case 'y': cfg.judgeY = strtof(optarg, NULL); break;
             case 'l': cfg.left   = strtof(optarg, NULL); break;
@@ -214,6 +218,7 @@ int main(int argc, char **argv) {
             case 't': cfg.toggle = strcmp(optarg, "always") == 0 ? 0 : 1; break;
             case 'p': cfg.port   = atoi(optarg); break;
             case 'd': cfg.debug  = 1; break;
+            case 'H': cfg.hideTouches = 1; break;
             default:  Usage(argv[0]); return c == 'h' ? 0 : 1;
         }
     }
@@ -259,6 +264,7 @@ int main(int argc, char **argv) {
     printf("判定线 y=%.2f，轨道 x=%.2f~%.2f，Flick 倍率 %.2f，开关：%s\n",
            cfg.judgeY, cfg.left, cfg.right, cfg.gain,
            cfg.toggle ? "Caps Lock（亮灯=生效）" : "始终生效");
+    printf("触摸点：%s\n", cfg.hideTouches ? "不显示" : "显示（--hide-touches 可关闭）");
     printf("Ctrl+C 退出。\n");
     CFRunLoopTimerRef hb = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent(), 0.1, 0, 0, Heartbeat, NULL);
     CFRunLoopAddTimer(CFRunLoopGetMain(), hb, kCFRunLoopCommonModes);
