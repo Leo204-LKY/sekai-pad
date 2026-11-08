@@ -22,6 +22,8 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/file.h>
+#include <fcntl.h>
 
 // ---- MultitouchSupport.framework 私有结构 ----
 typedef struct { float x, y; } MTPoint;
@@ -175,6 +177,27 @@ static void Heartbeat(CFRunLoopTimerRef t, void *info) {
     pthread_mutex_unlock(&gLock);
 }
 
+// 同一端口只允许一个助手程序：两个实例同时发包，插件会在两种映射之间来回跳。
+// 锁随进程退出自动释放（包括 Ctrl+C、关掉终端、崩溃）。
+static int SingleInstance(int port) {
+    char path[64];
+    snprintf(path, sizeof path, "/tmp/sekai-pad-%d.lock", port);
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) return 1;   // 拿不到锁文件就不检查，不影响使用
+    if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        char buf[16] = {0};
+        pread(fd, buf, sizeof buf - 1, 0);
+        fprintf(stderr, "已有一个 sekai-pad 在运行（端口 %d，PID %s），请先关掉它（Ctrl+C 或 kill %s）\n",
+                port, buf[0] ? buf : "?", buf[0] ? buf : "<PID>");
+        return 0;
+    }
+    char pid[16];
+    int n = snprintf(pid, sizeof pid, "%d", (int)getpid());
+    ftruncate(fd, 0);
+    pwrite(fd, pid, n, 0);
+    return 1;               // 故意不关闭 fd，进程存活期间一直持有锁
+}
+
 static void Usage(const char *argv0) {
     printf(
         "用法: %s [选项]\n"
@@ -223,6 +246,7 @@ int main(int argc, char **argv) {
         }
     }
     if (cfg.padR <= cfg.padL) { fprintf(stderr, "pad-right 必须大于 pad-left\n"); return 1; }
+    if (!SingleInstance(cfg.port)) return 1;
     setvbuf(stdout, NULL, _IOLBF, 0);
 
     void *h = dlopen("/System/Library/PrivateFrameworks/MultitouchSupport.framework/MultitouchSupport", RTLD_NOW);
