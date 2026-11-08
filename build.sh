@@ -6,7 +6,7 @@ mkdir -p build
 
 echo "==> 编译助手程序 sekai-pad"
 xcrun clang -O2 -Wall -o build/sekai-pad helper/sekai_pad.c \
-    -framework CoreFoundation -framework ApplicationServices
+    -framework CoreFoundation -framework ApplicationServices -framework IOKit
 codesign -fs - build/sekai-pad
 
 echo "==> 编译插件 SekaiPad.dylib（Mac Catalyst 平台，与 PlayCover 转换后的游戏一致）"

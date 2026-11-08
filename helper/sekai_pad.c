@@ -8,6 +8,8 @@
 //
 // 编译：见 build.sh（只依赖系统框架，私有框架用 dlopen 加载）
 
+#include <IOKit/hidsystem/IOHIDLib.h>
+#include <IOKit/hidsystem/IOHIDParameter.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <dlfcn.h>
@@ -83,9 +85,20 @@ static struct {
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
+static io_connect_t gHID;
+
+// 读 Caps Lock 的真实锁定状态（和指示灯一致）。
+// 「短按切换输入法」模式下，CG 的 AlphaShift 标志可能和指示灯不同步，只作后备。
 static int MappingOn(void) {
     if (cfg.toggle == 0) return 1;
-    return (CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & kCGEventFlagMaskAlphaShift) != 0;
+    int cg = (CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & kCGEventFlagMaskAlphaShift) != 0;
+    bool lock = false;
+    if (!gHID || IOHIDGetModifierLockState(gHID, kIOHIDCapsLockState, &lock) != KERN_SUCCESS) return cg;
+    if (cfg.debug && cg != (int)lock) {
+        static int lastWarn = -1;
+        if (lastWarn != (int)lock) { printf("（提示：指示灯=%d，CG 标志=%d，以指示灯为准）\n", lock, cg); lastWarn = lock; }
+    }
+    return lock;
 }
 
 static void SendAll(int on, int quiet) {
@@ -216,6 +229,13 @@ int main(int argc, char **argv) {
         fprintf(stderr, "MultitouchSupport 符号缺失\n");
         return 1;
     }
+
+    io_service_t hidSvc = IOServiceGetMatchingService(kIOMainPortDefault, IOServiceMatching(kIOHIDSystemClass));
+    if (!hidSvc || IOServiceOpen(hidSvc, mach_task_self(), kIOHIDParamConnectType, &gHID) != KERN_SUCCESS) {
+        gHID = 0;
+        fprintf(stderr, "提示：无法读取 Caps Lock 锁定状态，改用键盘标志\n");
+    }
+    if (hidSvc) IOObjectRelease(hidSvc);
 
     gSock = socket(AF_INET, SOCK_DGRAM, 0);
     memset(&gAddr, 0, sizeof gAddr);
