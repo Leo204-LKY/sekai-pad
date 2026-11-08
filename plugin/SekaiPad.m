@@ -14,8 +14,11 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <dlfcn.h>
 
-#define MAGIC  0x31504B53u   // "SKP1"
+#define MAGIC  0x31504B53u   // "SKP1"：映射开启
+#define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭
+#define CURSOR_TIMEOUT 0.5    // 这么久没收到「开启」包就恢复鼠标
 #define MAX_E  64
 #define TIMEOUT_SEC 0.25     // 助手程序断开/卡住时自动松开所有手指
 
@@ -30,6 +33,12 @@ static SEL gSel5, gSel3, gSelAvail;
 static BOOL gResolved;
 static dispatch_source_t gSrc, gTimer;
 static BOOL gGotFirst;
+static CFAbsoluteTime gLastOn;
+static BOOL gCursorLocked;
+static int (*pAssoc)(int);           // CGAssociateMouseAndMouseCursorPosition
+static int (*pHide)(uint32_t);       // CGDisplayHideCursor
+static int (*pShow)(uint32_t);       // CGDisplayShowCursor
+static uint32_t (*pMainDisplay)(void);
 static int gBeganLogs;
 
 static void Resolve(void) {
@@ -122,6 +131,31 @@ static void Apply(const Ent *e, int n) {
     }
 }
 
+// 映射开启 + 游戏在前台时：隐藏鼠标并让它不跟随触控板移动；否则恢复。
+// 这些是 macOS 的 CoreGraphics 函数，Catalyst 头文件里没有，用 dlsym 取。
+static void SetCursorLocked(BOOL lock) {
+    if (lock == gCursorLocked) return;
+    static BOOL loaded;
+    if (!loaded) {
+        loaded = YES;
+        pAssoc = dlsym(RTLD_DEFAULT, "CGAssociateMouseAndMouseCursorPosition");
+        pHide = dlsym(RTLD_DEFAULT, "CGDisplayHideCursor");
+        pShow = dlsym(RTLD_DEFAULT, "CGDisplayShowCursor");
+        pMainDisplay = dlsym(RTLD_DEFAULT, "CGMainDisplayID");
+        SPLOG(@"[SekaiPad] 鼠标控制函数: assoc=%d hide=%d show=%d", pAssoc != NULL, pHide != NULL, pShow != NULL);
+    }
+    if (!pAssoc || !pHide || !pShow || !pMainDisplay) return;
+    gCursorLocked = lock;
+    pAssoc(lock ? 0 : 1);
+    if (lock) pHide(pMainDisplay()); else pShow(pMainDisplay());
+}
+
+static void UpdateCursor(void) {
+    BOOL active = UIApplication.sharedApplication.applicationState == UIApplicationStateActive;
+    BOOL on = gLastOn > 0 && CFAbsoluteTimeGetCurrent() - gLastOn < CURSOR_TIMEOUT;
+    SetCursorLocked(on && active);
+}
+
 static BOOL AnyActive(void) {
     for (int k = 0; k < MAX_E; k++) if (gSlot[k].used) return YES;
     return NO;
@@ -157,12 +191,23 @@ static void StartListener(void) {
             uint32_t magic, count;
             memcpy(&magic, buf, 4);
             memcpy(&count, buf + 4, 4);
+            if (magic == MAGIC_OFF) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    gLastPacket = CFAbsoluteTimeGetCurrent();
+                    gLastOn = 0;
+                    Apply(NULL, 0);
+                    UpdateCursor();
+                });
+                continue;
+            }
             if (magic != MAGIC || count > MAX_E || 8 + count * sizeof(Ent) > (size_t)r) continue;
             NSData *d = [NSData dataWithBytes:buf + 8 length:count * sizeof(Ent)];
             int cnt = (int)count;
             // 每个包按顺序在主线程处理（不合并，避免吞掉极短的点按）
             dispatch_async(dispatch_get_main_queue(), ^{
                 gLastPacket = CFAbsoluteTimeGetCurrent();
+                gLastOn = gLastPacket;
+                UpdateCursor();
                 if (!gGotFirst) { gGotFirst = YES; SPLOG(@"[SekaiPad] 收到第一个数据包（%d 指）", cnt); }
                 Apply((const Ent *)d.bytes, cnt);
             });
@@ -174,6 +219,7 @@ static void StartListener(void) {
     dispatch_source_set_timer(gTimer, DISPATCH_TIME_NOW, 50 * NSEC_PER_MSEC, 10 * NSEC_PER_MSEC);
     dispatch_source_set_event_handler(gTimer, ^{
         if (AnyActive() && CFAbsoluteTimeGetCurrent() - gLastPacket > TIMEOUT_SEC) Apply(NULL, 0);
+        UpdateCursor();   // 助手程序退出或切到其他 App 时恢复鼠标
     });
     dispatch_resume(gTimer);
 

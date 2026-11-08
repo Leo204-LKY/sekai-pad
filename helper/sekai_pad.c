@@ -53,7 +53,8 @@ static void (*pMTDeviceStart)(MTDeviceRef, int);
 // ---- 协议（与 SekaiPad.m 一致）----
 #define MAX_DEV 4
 #define MAX_F   16
-#define MAGIC   0x31504B53u  // "SKP1"
+#define MAGIC   0x31504B53u  // "SKP1"：映射开启时的帧
+#define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭（插件据此恢复鼠标）
 
 typedef struct { int32_t id; float x, y; } Ent;   // x,y 为窗口归一化坐标，y 向下
 typedef struct { uint32_t magic, count; Ent e[MAX_DEV * MAX_F]; } Packet;
@@ -87,9 +88,9 @@ static int MappingOn(void) {
     return (CGEventSourceFlagsState(kCGEventSourceStateHIDSystemState) & kCGEventFlagMaskAlphaShift) != 0;
 }
 
-static void SendAll(int on) {
+static void SendAll(int on, int quiet) {
     Packet p;
-    p.magic = MAGIC;
+    p.magic = on ? MAGIC : MAGIC_OFF;
     p.count = 0;
     if (on) {
         for (int d = 0; d < gNDev; d++) {
@@ -107,7 +108,7 @@ static void SendAll(int on) {
     size_t len = 8 + p.count * sizeof(Ent);
     sendto(gSock, &p, len, 0, (struct sockaddr *)&gAddr, sizeof gAddr);
 
-    if (cfg.debug) {
+    if (cfg.debug && !quiet) {
         printf("[%s] %u 指", on ? "ON " : "OFF", p.count);
         for (uint32_t i = 0; i < p.count; i++)
             printf("  #%d(%.3f, %.3f)", p.e[i].id, p.e[i].x, p.e[i].y);
@@ -140,11 +141,23 @@ static int Callback(MTDeviceRef dev, MTTouch *t, int n, double ts, int frame) {
         ds->n = nn;
     }
 
-    if (on || gWasOn != 0) SendAll(on);   // 关闭状态只补发一次空帧
+    if (on || gWasOn != 0) SendAll(on, 0);   // 关闭状态只补发一次空帧
     gWasOn = on;
 
     pthread_mutex_unlock(&gLock);
     return 0;
+}
+
+// 每 0.1 秒发一次当前状态：没摸触控板时也能让插件及时知道 Caps Lock 开关，
+// 插件据此隐藏/恢复鼠标；助手程序退出后插件 0.5 秒内自动恢复。
+static void Heartbeat(CFRunLoopTimerRef t, void *info) {
+    (void)t; (void)info;
+    pthread_mutex_lock(&gLock);
+    int on = MappingOn();
+    if (!on) for (int d = 0; d < gNDev; d++) gDev[d].n = 0;
+    SendAll(on, on == gWasOn);
+    gWasOn = on;
+    pthread_mutex_unlock(&gLock);
 }
 
 static void Usage(const char *argv0) {
@@ -227,6 +240,8 @@ int main(int argc, char **argv) {
            cfg.judgeY, cfg.left, cfg.right, cfg.gain,
            cfg.toggle ? "Caps Lock（亮灯=生效）" : "始终生效");
     printf("Ctrl+C 退出。\n");
+    CFRunLoopTimerRef hb = CFRunLoopTimerCreate(NULL, CFAbsoluteTimeGetCurrent(), 0.1, 0, 0, Heartbeat, NULL);
+    CFRunLoopAddTimer(CFRunLoopGetMain(), hb, kCFRunLoopCommonModes);
     CFRunLoopRun();
     return 0;
 }
