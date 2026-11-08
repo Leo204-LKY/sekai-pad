@@ -5,7 +5,7 @@
 >
 > This is an unofficial, fan-made tool written entirely by Claude. It is not affiliated with or endorsed by SEGA, Colorful Palette, Nuverse, Crypton Future Media, or any related company or group. It has only been tested on the Mainland China version of the game (初音未来：缤纷舞台); other regional versions are untested. Using third-party tools may violate the game's Terms of Service; you use it at your own risk, and the author accepts no responsibility for account bans or any other consequences.
 
-SekaiPad 是一个触控板辅助工具，让整个触控板都能用作「Project Sekai: Colorful Stage」（又称 Hatsune Miku: Colorful Stage / 初音未来：缤纷舞台，以下简称 PJSK）的判定区域。
+SekaiPad 是一个触控板辅助工具，让整个触控板都能用作「Project Sekai: Colorful Stage!」 [^注] （以下简称 PJSK）的判定区域。
 
 在 PlayCover 里用 macOS 自带的「触控替代」玩 PJSK，有两个问题：
 
@@ -107,3 +107,5 @@ chmod +x build.sh && ./build.sh
 助手程序退出或卡住超过 0.25 秒时，插件会自动松开所有手指，不会出现「手指卡住」；鼠标也会在 0.5 秒内恢复显示。
 
 其他问题欢迎[提交 Issue](https://github.com/Leo204-LKY/sekai-pad/issues)。
+
+[^注]: 又称「プロジェクトセカイ カラフルステージ！ feat.初音ミク」「Hatsune Miku: Colorful Stage」「世界计划 缤纷舞台！ feat.初音未来」「初音未来：缤纷舞台」
