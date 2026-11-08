@@ -66,7 +66,7 @@ static void Apply(const Ent *e, int n) {
 
     UIWindow *w = KeyWindow();
     if (!w || UIApplication.sharedApplication.applicationState != UIApplicationStateActive) n = 0;
-    CGSize sz = w ? w.bounds.size : CGSizeZero;
+    CGSize sz = w ? w.bounds.size : CGSizeMake(0, 0);
 
     // 1. 本帧消失的手指 -> ended
     for (int k = 0; k < MAX_E; k++) {

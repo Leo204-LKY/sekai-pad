@@ -15,7 +15,7 @@ xcrun clang -O2 -Wall -fobjc-arc -dynamiclib \
     -target arm64-apple-ios14.0-macabi -isysroot "$SDK" \
     -iframework "$SDK/System/iOSSupport/System/Library/Frameworks" \
     -F "$SDK/System/iOSSupport/System/Library/Frameworks" \
-    -framework UIKit -framework Foundation \
+    -framework UIKit -framework Foundation -framework CoreGraphics \
     -o build/SekaiPad.dylib plugin/SekaiPad.m
 codesign -fs - build/SekaiPad.dylib
 
