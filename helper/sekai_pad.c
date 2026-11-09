@@ -24,6 +24,8 @@
 #include <sys/socket.h>
 #include <sys/file.h>
 #include <fcntl.h>
+#include <stddef.h>
+#include "protocol.h"
 
 // ---- MultitouchSupport.framework 私有结构 ----
 typedef struct { float x, y; } MTPoint;
@@ -54,16 +56,14 @@ static CFMutableArrayRef (*pMTDeviceCreateList)(void);
 static void (*pMTRegisterContactFrameCallback)(MTDeviceRef, MTFrameCallback);
 static void (*pMTDeviceStart)(MTDeviceRef, int);
 
-// ---- 协议（与 SekaiPad.m 一致）----
+// ---- 协议：见 shared/protocol.h ----
 #define MAX_DEV 4
 #define MAX_F   16
-#define MAGIC   0x31504B53u  // "SKP1"：映射开启时的帧
-#define MAGIC_NODOT 0x4E504B53u // "SKPN"：映射开启，插件不显示触摸点
-#define MAGIC_CROSS 0x58504B53u // "SKPX"：映射开启，插件用醒目的十字准星样式显示触摸点
-#define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭（插件据此恢复鼠标）
+#define ACK_WAIT 3.0   // 开始发包后这么久没收到插件回应，就提示一次
 
-typedef struct { int32_t id; float x, y; } Ent;   // x,y 为窗口归一化坐标，y 向下
-typedef struct { uint32_t magic, count; Ent e[MAX_DEV * MAX_F]; } Packet;
+typedef SpEnt Ent;
+typedef struct { SpHeader h; Ent e[MAX_DEV * MAX_F]; } Packet;
+_Static_assert(MAX_DEV * MAX_F <= SP_MAX_ENT, "一帧的手指数超过插件上限");
 
 typedef struct { int32_t id; float x, y, y0; } Finger;
 typedef struct { MTDeviceRef dev; int n; Finger f[MAX_F]; } DevState;
@@ -74,6 +74,8 @@ static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
 static int gSock = -1;
 static struct sockaddr_in gAddr;
 static int gWasOn = -1;
+static CFAbsoluteTime gStart;
+static int gAckState;   // 0 = 还没收到回应，1 = 已提示等待，2 = 已连接，3 = 已提示版本不一致
 
 static struct {
     float judgeY;   // 判定线高度（窗口高度比例，0=顶 1=底）
@@ -85,7 +87,7 @@ static struct {
     int toggle;     // 0 = 始终开启，1 = 跟随 Caps Lock
     int debug;
     int port;
-    int touchStyle;  // 0 = 普通圆点，1 = 不显示，2 = 醒目十字准星
+    int touchStyle;  // SP_STYLE_DOT / SP_STYLE_NONE / SP_STYLE_CROSS
 } cfg = { 0.82f, 0.12f, 0.88f, 0.03f, 0.97f, 1.0f, 1, 0, 47800, 0 };
 
 static const char *kStyleNames[] = { "dot", "none", "cross" };
@@ -110,13 +112,12 @@ static int MappingOn(void) {
 
 static void SendAll(int on, int quiet) {
     Packet p;
-    p.magic = !on ? MAGIC_OFF : (cfg.touchStyle == 1 ? MAGIC_NODOT : cfg.touchStyle == 2 ? MAGIC_CROSS : MAGIC);
-    p.count = 0;
+    p.h = (SpHeader){ SP_MAGIC, SP_PROTO, (uint8_t)(on ? 1 : 0), (uint8_t)cfg.touchStyle, 0 };
     if (on) {
         for (int d = 0; d < gNDev; d++) {
             for (int i = 0; i < gDev[d].n; i++) {
                 Finger *f = &gDev[d].f[i];
-                Ent *e = &p.e[p.count++];
+                Ent *e = &p.e[p.h.count++];
                 e->id = d * 100000 + f->id;
                 float u = clampf((f->x - cfg.padL) / (cfg.padR - cfg.padL), 0.f, 1.f);
                 e->x = cfg.left + u * (cfg.right - cfg.left);
@@ -125,12 +126,12 @@ static void SendAll(int on, int quiet) {
             }
         }
     }
-    size_t len = 8 + p.count * sizeof(Ent);
+    size_t len = sizeof(SpHeader) + p.h.count * sizeof(Ent);
     sendto(gSock, &p, len, 0, (struct sockaddr *)&gAddr, sizeof gAddr);
 
     if (cfg.debug && !quiet) {
-        printf("[%s] %u 指", on ? "ON " : "OFF", p.count);
-        for (uint32_t i = 0; i < p.count; i++)
+        printf("[%s] %u 指", on ? "ON " : "OFF", p.h.count);
+        for (uint32_t i = 0; i < p.h.count; i++)
             printf("  #%d(%.3f, %.3f)", p.e[i].id, p.e[i].x, p.e[i].y);
         printf("\n");
     }
@@ -170,8 +171,34 @@ static int Callback(MTDeviceRef dev, MTTouch *t, int n, double ts, int frame) {
 
 // 每 0.1 秒发一次当前状态：没摸触控板时也能让插件及时知道 Caps Lock 开关，
 // 插件据此隐藏/恢复鼠标；助手程序退出后插件 0.5 秒内自动恢复。
+// 读插件的回应，检查两边版本是否一致。一直收不到回应时提示一次。
+static void CheckAck(void) {
+    SpAck a;
+    ssize_t r;
+    while ((r = recv(gSock, &a, sizeof a, 0)) >= (ssize_t)offsetof(SpAck, version)) {
+        if (a.magic != SP_MAGIC_ACK) continue;
+        a.version[sizeof a.version - 1] = 0;
+        if (a.proto != SP_PROTO) {
+            if (gAckState != 3)
+                printf("⚠️  插件版本不一致：插件 v%s（协议 %d），助手程序 v%s（协议 %d）。"
+                       "请在 PlayCover 的 Custom Plugins 里删掉旧插件，重新添加 build/SekaiPad.dylib，然后重启游戏\n",
+                       a.version, a.proto, SEKAIPAD_VERSION, SP_PROTO);
+            gAckState = 3;
+        } else if (gAckState != 2) {
+            printf("已连接插件 v%s\n", a.version);
+            gAckState = 2;
+        }
+    }
+    if (gAckState == 0 && CFAbsoluteTimeGetCurrent() - gStart > ACK_WAIT) {
+        printf("提示：还没收到插件回应。游戏没启动的话可以忽略；"
+               "游戏已经在运行，说明插件没加载或版本过旧（v0.1.x），请重新添加 build/SekaiPad.dylib 并重启游戏\n");
+        gAckState = 1;
+    }
+}
+
 static void Heartbeat(CFRunLoopTimerRef t, void *info) {
     (void)t; (void)info;
+    CheckAck();
     pthread_mutex_lock(&gLock);
     int on = MappingOn();
     if (!on) for (int d = 0; d < gNDev; d++) gDev[d].n = 0;
@@ -213,7 +240,8 @@ static void Usage(const char *argv0) {
         "  --toggle MODE   capslock = Caps Lock 亮灯时生效 / always = 一直生效 (默认 capslock)\n"
         "  --port N        UDP 端口 (默认 %d)\n"
         "  --touch-style S 触摸点样式：dot = 半透明圆点 / cross = 醒目十字准星（校准用）/ none = 不显示 (默认 dot)\n"
-        "  --debug         打印每帧映射后的坐标\n",
+        "  --debug         打印每帧映射后的坐标\n"
+        "  --version       显示版本号\n",
         argv0, cfg.judgeY, cfg.left, cfg.right, cfg.padL, cfg.padR, cfg.gain, cfg.port);
 }
 
@@ -229,11 +257,12 @@ int main(int argc, char **argv) {
         { "port",       required_argument, 0, 'p' },
         { "debug",      no_argument,       0, 'd' },
         { "touch-style", required_argument, 0, 's' },
+        { "version",    no_argument,       0, 'V' },
         { "help",       no_argument,       0, 'h' },
         { 0, 0, 0, 0 }
     };
     int c;
-    while ((c = getopt_long(argc, argv, "y:l:r:L:R:g:t:p:s:dh", opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "y:l:r:L:R:g:t:p:s:dVh", opts, NULL)) != -1) {
         switch (c) {
             case 'y': cfg.judgeY = strtof(optarg, NULL); break;
             case 'l': cfg.left   = strtof(optarg, NULL); break;
@@ -244,6 +273,7 @@ int main(int argc, char **argv) {
             case 't': cfg.toggle = strcmp(optarg, "always") == 0 ? 0 : 1; break;
             case 'p': cfg.port   = atoi(optarg); break;
             case 'd': cfg.debug  = 1; break;
+            case 'V': printf("sekai-pad v%s（协议 %d）\n", SEKAIPAD_VERSION, SP_PROTO); return 0;
             case 's': {
                 int found = -1;
                 for (int i = 0; i < 3; i++) if (strcmp(optarg, kStyleNames[i]) == 0) found = i;
@@ -276,6 +306,7 @@ int main(int argc, char **argv) {
     if (hidSvc) IOObjectRelease(hidSvc);
 
     gSock = socket(AF_INET, SOCK_DGRAM, 0);
+    fcntl(gSock, F_SETFL, fcntl(gSock, F_GETFL) | O_NONBLOCK);   // 心跳里非阻塞地读插件回应
     memset(&gAddr, 0, sizeof gAddr);
     gAddr.sin_family = AF_INET;
     gAddr.sin_port = htons((uint16_t)cfg.port);
@@ -293,7 +324,8 @@ int main(int argc, char **argv) {
         pMTDeviceStart(dev, 0);
     }
 
-    printf("SekaiPad 已启动：%d 个触控板，UDP 127.0.0.1:%d\n", gNDev, cfg.port);
+    gStart = CFAbsoluteTimeGetCurrent();
+    printf("SekaiPad v%s 已启动：%d 个触控板，UDP 127.0.0.1:%d\n", SEKAIPAD_VERSION, gNDev, cfg.port);
     printf("判定线 y=%.2f，轨道 x=%.2f~%.2f，Flick 倍率 %.2f，开关：%s\n",
            cfg.judgeY, cfg.left, cfg.right, cfg.gain,
            cfg.toggle ? "Caps Lock（亮灯=生效）" : "始终生效");

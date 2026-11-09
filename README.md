@@ -48,6 +48,8 @@ chmod +x build.sh && ./build.sh
 
 得到 `build/sekai-pad` 和 `build/SekaiPad.dylib`。
 
+助手程序和插件必须来自同一次编译。更新代码（`git pull` 或下载新版本）后，除了重新运行 `./build.sh`，还要在 PlayCover 里删掉旧插件、重新添加 `build/SekaiPad.dylib`，并重启游戏。各版本见 [Releases](https://github.com/Leo204-LKY/sekai-pad/releases)。
+
 ### 安装和游玩
 
 1. 在 PlayCover 的应用库里右键 PJSK 图标 → 设置 → 「杂项」标签页，往下找到 Custom Plugins 区域（PlayCover 翻译不完全，可能显示 `settings.customPlugins.title`），点 **Add…** (`settings.customPlugins.add`) 选择 `build/SekaiPad.dylib`。
@@ -83,6 +85,7 @@ chmod +x build.sh && ./build.sh
 | `--touch-style S` | 触摸点样式：`dot` = 半透明圆点，`cross` = 醒目的十字准星（贯穿全屏的横竖线 + 圆环 + 中心点，方便校准），`none` = 不显示 | `dot` |
 | `--debug` | 调试模式，在终端打印每帧映射后的坐标 | 关闭 |
 | `--port N` | 与插件通信的 UDP 端口（插件固定监听 47800，一般不需要改） | 47800 |
+| `--version` | 显示版本号 | |
 | `--help` | 显示所有参数 | |
 
 
@@ -93,15 +96,17 @@ chmod +x build.sh && ./build.sh
 ### 助手程序
 
 - **提示「没有找到触控板设备」，或摸触控板时终端没有任何输出**：给运行它的终端 App 开「输入监控」权限（系统设置 → 隐私与安全性 → 输入监控），然后重启终端。
+- **提示「插件版本不一致」或「还没收到插件回应」（游戏已在运行）**：插件和助手程序不是同一次编译的。在 PlayCover 的 Custom Plugins 里删掉旧插件，重新添加 `build/SekaiPad.dylib`，然后完全退出并重启游戏。连上后终端会显示「已连接插件 vX.Y.Z」。
 - **摸触控板时一直显示 `[OFF]`**：映射没有开启。确认 Caps Lock 指示灯亮着；如果 Caps Lock 设成了「短按切换输入法」，要**长按**才会亮灯。也可以改用 `--toggle always`。
 
 ### 终端显示 `[ON ]`，但游戏没反应
 
 - **刚添加插件、或替换过 `SekaiPad.dylib`**：插件只在游戏启动时加载，需要完全退出游戏再打开。PlayCover 添加插件时会复制一份，重新编译后要在 Custom Plugins 里删掉旧的再添加一次。
 - **查看插件日志**：打开「控制台」App，选中本机，点「开始」，在搜索框输入 `SekaiPad`，然后启动游戏：
+  - **「助手程序版本过旧」或「协议版本不一致」**：重新运行 `./build.sh`，用新编译的 `build/sekai-pad`。
   - **没有「正在监听 127.0.0.1:47800」**：插件没有加载，检查 PlayCover 的 Custom Plugins 设置。
   - **「绑定 127.0.0.1:47800 失败」**：端口被其他程序占用，可以用 `lsof -nP -iUDP:47800` 查看是哪个进程，关掉它后重启游戏。
-  - **「找不到 PTFakeMetaTouch」或「5参=0 3参=0」**：当前 PlayTools 版本的触摸接口与本项目不兼容，请[提交 Issue](https://github.com/Leo204-LKY/sekai-pad/issues)，附上这几行日志和 PlayCover 版本号。
+  - **「找不到 PTFakeMetaTouch」或「5参=0 3参=0」**：当前 PlayTools 版本的触摸接口与本项目不兼容，请[提交 Issue](https://github.com/Leo204-LKY/sekai-pad/issues)，附上这几行日志、PlayCover 版本号和 `./build/sekai-pad --version` 的输出。
   - **「忽略触摸」**：游戏窗口不在前台，点一下游戏窗口再试。
 
 ### 游戏里

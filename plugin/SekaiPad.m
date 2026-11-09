@@ -16,18 +16,17 @@
 #include <unistd.h>
 #include <dlfcn.h>
 
-#define MAGIC  0x31504B53u   // "SKP1"：映射开启
-#define MAGIC_NODOT 0x4E504B53u // "SKPN"：映射开启，但不显示触摸点（助手程序 --touch-style none）
-#define MAGIC_CROSS 0x58504B53u // "SKPX"：映射开启，用醒目的十字准星样式（助手程序 --touch-style cross）
-#define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭
+#include "protocol.h"
+
 #define DOT_SIZE 44.0         // 触摸点直径（点）
 #define CROSS_RING 36.0       // 十字准星样式的圆环直径（点）
 #define CROSS_LINE 1.5        // 十字准星贯穿线粗细（点）
 #define CURSOR_TIMEOUT 0.5    // 这么久没收到「开启」包就恢复鼠标
-#define MAX_E  64
+#define MAX_E  SP_MAX_ENT
+#define ACK_INTERVAL 0.5     // 回应助手程序的最短间隔
 #define TIMEOUT_SEC 0.25     // 助手程序断开/卡住时自动松开所有手指
 
-typedef struct { int32_t id; float x, y; } Ent;
+typedef SpEnt Ent;
 typedef struct { BOOL used; int32_t fid; NSInteger pid; CGPoint p; } Slot;
 
 static Slot gSlot[MAX_E];
@@ -46,7 +45,7 @@ static int (*pShow)(uint32_t);       // CGDisplayShowCursor
 static uint32_t (*pMainDisplay)(void);
 static int gBeganLogs;
 static id gClickMonitor;              // NSEvent 本地监视器，需持有
-typedef enum { DotNormal = 0, DotNone = 1, DotCross = 2 } DotStyle;
+typedef enum { DotNormal = SP_STYLE_DOT, DotNone = SP_STYLE_NONE, DotCross = SP_STYLE_CROSS } DotStyle;
 static DotStyle gDotStyle = DotNormal;   // 当前样式，来自助手程序
 static DotStyle gBuiltStyle = DotNormal; // gDots 里现有视图的样式
 static NSMutableDictionary<NSNumber *, UIView *> *gDots;   // 手指 id -> 屏幕上的触摸点
@@ -326,14 +325,46 @@ static void StartListener(void) {
     dispatch_queue_t q = dispatch_queue_create("sekaipad.udp", DISPATCH_QUEUE_SERIAL);
     gSrc = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, q);
     dispatch_source_set_event_handler(gSrc, ^{
-        uint8_t buf[8 + MAX_E * sizeof(Ent)];
+        uint8_t buf[sizeof(SpHeader) + MAX_E * sizeof(Ent)];
+        static CFAbsoluteTime lastAck;
+        static int warnedProto = -1;
         for (;;) {
-            ssize_t r = recv(fd, buf, sizeof buf, 0);
-            if (r < 8) break;
-            uint32_t magic, count;
+            struct sockaddr_in from;
+            socklen_t fromLen = sizeof from;
+            ssize_t r = recvfrom(fd, buf, sizeof buf, 0, (struct sockaddr *)&from, &fromLen);
+            if (r < 4) break;
+            uint32_t magic;
             memcpy(&magic, buf, 4);
-            memcpy(&count, buf + 4, 4);
-            if (magic == MAGIC_OFF) {
+            if (magic == SP_MAGIC_V1_ON || magic == SP_MAGIC_V1_NODOT || magic == SP_MAGIC_V1_OFF) {
+                if (warnedProto != 1) {
+                    warnedProto = 1;
+                    SPLOG(@"[SekaiPad] 助手程序版本过旧（v0.1.x 协议），插件 v%s 需要协议 %d，请重新编译并运行新的 sekai-pad",
+                          SEKAIPAD_VERSION, SP_PROTO);
+                }
+                continue;
+            }
+            if (magic != SP_MAGIC || r < (ssize_t)sizeof(SpHeader)) continue;
+            SpHeader h;
+            memcpy(&h, buf, sizeof h);
+
+            // 回应助手程序（带上插件的协议号和版本），让它能在终端提示版本不一致
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - lastAck >= ACK_INTERVAL) {
+                lastAck = now;
+                SpAck ack = { SP_MAGIC_ACK, SP_PROTO, 0, {0} };
+                strlcpy(ack.version, SEKAIPAD_VERSION, sizeof ack.version);
+                sendto(fd, &ack, sizeof ack, 0, (struct sockaddr *)&from, fromLen);
+            }
+
+            if (h.proto != SP_PROTO) {
+                if (warnedProto != h.proto) {
+                    warnedProto = h.proto;
+                    SPLOG(@"[SekaiPad] 协议版本不一致：助手程序 %d，插件 v%s 为 %d，请用同一次编译的 sekai-pad 和 SekaiPad.dylib",
+                          h.proto, SEKAIPAD_VERSION, SP_PROTO);
+                }
+                continue;
+            }
+            if (!h.on) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     gLastPacket = CFAbsoluteTimeGetCurrent();
                     gLastOn = 0;
@@ -342,11 +373,10 @@ static void StartListener(void) {
                 });
                 continue;
             }
-            DotStyle style = magic == MAGIC_NODOT ? DotNone : magic == MAGIC_CROSS ? DotCross : DotNormal;
-            if (magic == MAGIC_NODOT || magic == MAGIC_CROSS) magic = MAGIC;
-            if (magic != MAGIC || count > MAX_E || 8 + count * sizeof(Ent) > (size_t)r) continue;
-            NSData *d = [NSData dataWithBytes:buf + 8 length:count * sizeof(Ent)];
-            int cnt = (int)count;
+            if (h.count > MAX_E || sizeof(SpHeader) + h.count * sizeof(Ent) > (size_t)r) continue;
+            DotStyle style = h.style == SP_STYLE_NONE ? DotNone : h.style == SP_STYLE_CROSS ? DotCross : DotNormal;
+            NSData *d = [NSData dataWithBytes:buf + sizeof(SpHeader) length:h.count * sizeof(Ent)];
+            int cnt = (int)h.count;
             // 每个包按顺序在主线程处理（不合并，避免吞掉极短的点按）
             dispatch_async(dispatch_get_main_queue(), ^{
                 gLastPacket = CFAbsoluteTimeGetCurrent();
@@ -368,7 +398,7 @@ static void StartListener(void) {
     });
     dispatch_resume(gTimer);
 
-    SPLOG(@"[SekaiPad] 正在监听 127.0.0.1:%d", port);
+    SPLOG(@"[SekaiPad] v%s（协议 %d）正在监听 127.0.0.1:%d", SEKAIPAD_VERSION, SP_PROTO, port);
 }
 
 __attribute__((constructor))
