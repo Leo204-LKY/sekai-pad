@@ -17,9 +17,12 @@
 #include <dlfcn.h>
 
 #define MAGIC  0x31504B53u   // "SKP1"：映射开启
-#define MAGIC_NODOT 0x4E504B53u // "SKPN"：映射开启，但不显示触摸点（助手程序 --hide-touches）
+#define MAGIC_NODOT 0x4E504B53u // "SKPN"：映射开启，但不显示触摸点（助手程序 --touch-style none）
+#define MAGIC_CROSS 0x58504B53u // "SKPX"：映射开启，用醒目的十字准星样式（助手程序 --touch-style cross）
 #define MAGIC_OFF 0x30504B53u // "SKP0"：映射关闭
 #define DOT_SIZE 44.0         // 触摸点直径（点）
+#define CROSS_RING 36.0       // 十字准星样式的圆环直径（点）
+#define CROSS_LINE 1.5        // 十字准星贯穿线粗细（点）
 #define CURSOR_TIMEOUT 0.5    // 这么久没收到「开启」包就恢复鼠标
 #define MAX_E  64
 #define TIMEOUT_SEC 0.25     // 助手程序断开/卡住时自动松开所有手指
@@ -42,7 +45,9 @@ static int (*pHide)(uint32_t);       // CGDisplayHideCursor
 static int (*pShow)(uint32_t);       // CGDisplayShowCursor
 static uint32_t (*pMainDisplay)(void);
 static int gBeganLogs;
-static BOOL gShowDots = YES;
+typedef enum { DotNormal = 0, DotNone = 1, DotCross = 2 } DotStyle;
+static DotStyle gDotStyle = DotNormal;   // 当前样式，来自助手程序
+static DotStyle gBuiltStyle = DotNormal; // gDots 里现有视图的样式
 static NSMutableDictionary<NSNumber *, UIView *> *gDots;   // 手指 id -> 屏幕上的触摸点
 
 static void Resolve(void) {
@@ -80,7 +85,7 @@ static NSInteger Fake(NSInteger pid, CGPoint p, UITouchPhase ph, UIWindow *w, UI
 
 // 在注入位置画半透明圆点（类似「触控替代」的点）。
 // userInteractionEnabled = NO，不会挡住 hitTest，也不会吃掉触摸。
-static UIView *MakeDot(void) {
+static UIView *MakeNormalDot(void) {
     UIView *d = [[UIView alloc] initWithFrame:CGRectMake(0, 0, DOT_SIZE, DOT_SIZE)];
     d.userInteractionEnabled = NO;
     d.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
@@ -91,9 +96,69 @@ static UIView *MakeDot(void) {
     return d;
 }
 
+static UIView *Bar(CGRect f, UIColor *c) {
+    UIView *v = [[UIView alloc] initWithFrame:f];
+    v.userInteractionEnabled = NO;
+    v.backgroundColor = c;
+    return v;
+}
+
+// 醒目样式（校准用）：贯穿整个窗口的横竖细线 + 品红圆环 + 中心实心点。
+// 每条线都是「黑底 + 亮色」两层，在亮/暗背景上都看得清。
+// 视图本身是 0x0，所有内容以 (0,0) 为中心向外画，center 就是精确的注入坐标。
+static UIView *MakeCrossDot(void) {
+    UIView *d = [[UIView alloc] initWithFrame:CGRectZero];
+    d.userInteractionEnabled = NO;
+    d.clipsToBounds = NO;
+    d.layer.zPosition = 10000;
+
+    UIColor *hi = [UIColor colorWithRed:1.0 green:0.15 blue:0.85 alpha:0.95];
+    UIColor *hiLine = [UIColor colorWithRed:1.0 green:0.15 blue:0.85 alpha:0.7];
+    UIColor *shadow = [UIColor colorWithWhite:0 alpha:0.55];
+    const CGFloat L = 4096;            // 足够长，覆盖任何窗口
+    const CGFloat t = CROSS_LINE, o = 1; // 亮线粗细，黑边宽度
+
+    // 贯穿线（先画黑边，再画亮线）
+    [d addSubview:Bar(CGRectMake(-L, -t / 2 - o, 2 * L, t + 2 * o), shadow)];
+    [d addSubview:Bar(CGRectMake(-t / 2 - o, -L, t + 2 * o, 2 * L), shadow)];
+    [d addSubview:Bar(CGRectMake(-L, -t / 2, 2 * L, t), hiLine)];
+    [d addSubview:Bar(CGRectMake(-t / 2, -L, t, 2 * L), hiLine)];
+
+    // 圆环：外黑边 + 品红
+    CGFloat R = CROSS_RING;
+    UIView *ringShadow = Bar(CGRectMake(-R / 2 - o, -R / 2 - o, R + 2 * o, R + 2 * o), UIColor.clearColor);
+    ringShadow.layer.cornerRadius = R / 2 + o;
+    ringShadow.layer.borderWidth = 5 + 2 * o;
+    ringShadow.layer.borderColor = shadow.CGColor;
+    [d addSubview:ringShadow];
+    UIView *ring = Bar(CGRectMake(-R / 2, -R / 2, R, R), UIColor.clearColor);
+    ring.layer.cornerRadius = R / 2;
+    ring.layer.borderWidth = 4;
+    ring.layer.borderColor = hi.CGColor;
+    [d addSubview:ring];
+
+    // 中心点：白芯黑边，标出精确位置
+    CGFloat c = 6;
+    UIView *center = Bar(CGRectMake(-c / 2, -c / 2, c, c), UIColor.whiteColor);
+    center.layer.cornerRadius = c / 2;
+    center.layer.borderWidth = 1.5;
+    center.layer.borderColor = UIColor.blackColor.CGColor;
+    [d addSubview:center];
+    return d;
+}
+
+static UIView *MakeDot(void) {
+    return gDotStyle == DotCross ? MakeCrossDot() : MakeNormalDot();
+}
+
 static void UpdateDots(UIWindow *w) {
     NSMutableSet<NSNumber *> *alive = [NSMutableSet set];
-    if (w && gShowDots) {
+    if (gBuiltStyle != gDotStyle) {   // 样式变了：丢掉旧视图，下面按新样式重建
+        for (UIView *d in gDots.allValues) [d removeFromSuperview];
+        [gDots removeAllObjects];
+        gBuiltStyle = gDotStyle;
+    }
+    if (w && gDotStyle != DotNone) {
         for (int k = 0; k < MAX_E; k++) {
             if (!gSlot[k].used) continue;
             NSNumber *key = @(gSlot[k].fid);
@@ -240,8 +305,8 @@ static void StartListener(void) {
                 });
                 continue;
             }
-            BOOL dots = magic == MAGIC;
-            if (magic == MAGIC_NODOT) magic = MAGIC;
+            DotStyle style = magic == MAGIC_NODOT ? DotNone : magic == MAGIC_CROSS ? DotCross : DotNormal;
+            if (magic == MAGIC_NODOT || magic == MAGIC_CROSS) magic = MAGIC;
             if (magic != MAGIC || count > MAX_E || 8 + count * sizeof(Ent) > (size_t)r) continue;
             NSData *d = [NSData dataWithBytes:buf + 8 length:count * sizeof(Ent)];
             int cnt = (int)count;
@@ -249,7 +314,7 @@ static void StartListener(void) {
             dispatch_async(dispatch_get_main_queue(), ^{
                 gLastPacket = CFAbsoluteTimeGetCurrent();
                 gLastOn = gLastPacket;
-                gShowDots = dots;
+                gDotStyle = style;
                 UpdateCursor();
                 if (!gGotFirst) { gGotFirst = YES; SPLOG(@"[SekaiPad] 收到第一个数据包（%d 指）", cnt); }
                 Apply((const Ent *)d.bytes, cnt);
