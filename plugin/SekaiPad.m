@@ -45,6 +45,7 @@ static int (*pHide)(uint32_t);       // CGDisplayHideCursor
 static int (*pShow)(uint32_t);       // CGDisplayShowCursor
 static uint32_t (*pMainDisplay)(void);
 static int gBeganLogs;
+static id gClickMonitor;              // NSEvent 本地监视器，需持有
 typedef enum { DotNormal = 0, DotNone = 1, DotCross = 2 } DotStyle;
 static DotStyle gDotStyle = DotNormal;   // 当前样式，来自助手程序
 static DotStyle gBuiltStyle = DotNormal; // gDots 里现有视图的样式
@@ -261,6 +262,42 @@ static void UpdateCursor(void) {
     SetCursorLocked(on && active);
 }
 
+// 映射开启时，用力按下触控板会产生真实的鼠标点击，落在（已隐藏的）鼠标位置，
+// 被游戏当成一次额外的触摸。这里给本进程加一个 NSEvent 本地监视器，
+// 映射生效期间吞掉鼠标按键和压力事件。只作用于游戏进程本身，不需要额外权限；
+// PTFakeMetaTouch 直接走 UIApplication，不经过 NSEvent，不受影响。
+// 按下时被吞掉的点击，对应的松开/拖动也一起吞掉，避免游戏收到孤立的 up。
+static void InstallClickBlocker(void) {
+    Class ev = NSClassFromString(@"NSEvent");
+    SEL sel = NSSelectorFromString(@"addLocalMonitorForEventsMatchingMask:handler:");
+    if (!ev || ![ev respondsToSelector:sel]) { SPLOG(@"[SekaiPad] 无法拦截鼠标点击（找不到 NSEvent 本地监视器）"); return; }
+
+    // NSEventType：1/2/6 左键按下/松开/拖动，3/4/7 右键，25/26/27 其他键，34 压力（Force Touch）
+    static const int kDown[] = { 1, 3, 25 }, kUp[] = { 2, 4, 26 };
+    uint64_t mask = 0;
+    for (int i = 0; i < 3; i++) mask |= 1ull << kDown[i] | 1ull << kUp[i];
+    mask |= 1ull << 6 | 1ull << 7 | 1ull << 27 | 1ull << 34;
+
+    static int swallowed;   // 当前被吞掉、还没松开的按键数
+    id (^handler)(id) = ^id(id e) {
+        NSUInteger type = ((NSUInteger (*)(id, SEL))objc_msgSend)(e, NSSelectorFromString(@"type"));
+        BOOL isDown = NO, isUp = NO;
+        for (int i = 0; i < 3; i++) { if ((int)type == kDown[i]) isDown = YES; if ((int)type == kUp[i]) isUp = YES; }
+        if (isDown) {
+            if (!gCursorLocked) return e;
+            swallowed++;
+            return nil;
+        }
+        if (isUp) {
+            if (swallowed > 0) { swallowed--; return nil; }
+            return e;
+        }
+        return (gCursorLocked || swallowed > 0) ? nil : e;   // 拖动 / 压力
+    };
+    gClickMonitor = ((id (*)(id, SEL, uint64_t, id))objc_msgSend)(ev, sel, mask, handler);
+    SPLOG(@"[SekaiPad] 鼠标点击拦截：%@", gClickMonitor ? @"已启用" : @"失败");
+}
+
 static BOOL AnyActive(void) {
     for (int k = 0; k < MAX_E; k++) if (gSlot[k].used) return YES;
     return NO;
@@ -339,4 +376,6 @@ static void SekaiPadInit(void) {
     gViews = [NSMutableDictionary new];
     gDots = [NSMutableDictionary new];
     StartListener();
+    // NSApplication 在 constructor 时可能还没准备好，放到主线程下一轮再装
+    dispatch_async(dispatch_get_main_queue(), ^{ InstallClickBlocker(); });
 }
