@@ -1,11 +1,11 @@
 # SekaiPad — PlayCover 下 Project SEKAI 的触控板直触方案
 
 > [!WARNING]
-> 本项目是非官方的个人工具，代码完全由 Claude 编写，与 SEGA、Colorful Palette、朝夕光年、Crypton Future Media 等公司或团体均无任何关联。目前只在中国大陆版《初音未来：缤纷舞台》上测试过，其他服务器版本未经验证。使用第三方工具可能违反游戏的服务条款，由此导致的封号等后果由使用者自行承担，作者不承担任何责任。
+> 本项目是非官方的个人工具，与 SEGA、Colorful Palette、朝夕光年、Crypton Future Media 等公司或团体均无任何关联。目前只在中国大陆版《初音未来：缤纷舞台》上测试过，其他服务器版本未经验证。本工具也可能随游戏、PlayCover 或 macOS 的更新而失效。使用第三方工具可能违反游戏的服务条款，由此导致的封号等后果由使用者自行承担，作者不承担任何责任。
 >
-> This is an unofficial, fan-made tool written entirely by Claude. It is not affiliated with or endorsed by SEGA, Colorful Palette, Nuverse, Crypton Future Media, or any related company or group. It has only been tested on the Mainland China version of the game (初音未来：缤纷舞台); other regional versions are untested. Using third-party tools may violate the game's Terms of Service; you use it at your own risk, and the author accepts no responsibility for account bans or any other consequences.
+> This is an unofficial, fan-made tool. It is not affiliated with or endorsed by SEGA, Colorful Palette, Nuverse, Crypton Future Media, or any related company or group. It has only been tested on the Mainland China version of the game (初音未来：缤纷舞台); other regional versions are untested. The tool may also stop working after updates to the game, PlayCover, or macOS. Using third-party tools may violate the game's Terms of Service; you use it at your own risk, and the author accepts no responsibility for account bans or any other consequences.
 
-SekaiPad 是一个触控板辅助工具，让整个触控板都能用作「Project Sekai: Colorful Stage!」 [^注] （以下简称 PJSK）的判定区域。
+SekaiPad 是一个触控板辅助工具，让整个触控板都能用作「Project Sekai: Colorful Stage!」 [^1] （以下简称 PJSK）的判定区域。
 
 在 PlayCover 里用 macOS 自带的「触控替代」玩 PJSK，有两个问题：
 
@@ -29,9 +29,13 @@ SekaiPad 的做法：
         ──PTFakeMetaTouch──> 游戏收到的真实多点触控
 ```
 
-分成两部分，是因为游戏进程里大概率读不了触控板原始数据（沙盒 + 平台限制），普通命令行程序可以。
+助手程序读取触控板的原始输入，经本机 UDP 发送给插件；插件通过 PlayCover 的 Custom Plugins 机制加载进游戏进程，再调用 PlayTools 自带的触摸接口生成多点触控。这和 PlayCover 的键位映射用的是同一套机制。
+
+本工具只将触控板输入转换为游戏中的触摸操作，不读取或修改游戏数据（分数、谱面、存档等），不修改游戏的网络通信，也不联网：助手程序与插件只通过本机 `127.0.0.1` 通信。所有代码均在本仓库开源，你可以自行审阅，或借助 AI 工具审阅。
 
 ## 使用
+
+仓库未提供打包好的程序，你需要自行构建。需要 Apple Silicon Mac，以及 Xcode 或 Command Line Tools（没有的话先运行 `xcode-select --install`）。
 
 ### 编译
 
@@ -52,7 +56,7 @@ chmod +x build.sh && ./build.sh
    - **关闭「轻点来点按」**；
    - MASTER 谱面推荐在「更多手势」里关掉三指/四指手势。
 4. 终端运行：`./build/sekai-pad`，再启动游戏。
-5. 通过 Caps Lock 键切换映射开关（键盘亮/灭绿灯表示开/关）
+5. 通过 Caps Lock 键切换映射开关（键盘亮/灭绿灯表示开/关）。
 
 ## 启动参数
 
@@ -108,4 +112,4 @@ chmod +x build.sh && ./build.sh
 
 其他问题欢迎[提交 Issue](https://github.com/Leo204-LKY/sekai-pad/issues)。
 
-[^注]: 又称「プロジェクトセカイ カラフルステージ！ feat.初音ミク」「Hatsune Miku: Colorful Stage」「世界计划 缤纷舞台！ feat.初音未来」「初音未来：缤纷舞台」
+[^1]: 又称「プロジェクトセカイ カラフルステージ！ feat.初音ミク」「Hatsune Miku: Colorful Stage」「世界计划 缤纷舞台！ feat.初音未来」「初音未来：缤纷舞台」
